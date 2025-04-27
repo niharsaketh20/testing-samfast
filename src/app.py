@@ -2,47 +2,36 @@ from fastapi import FastAPI, UploadFile, HTTPException, Form
 from fastapi.responses import Response
 from PIL import Image
 import io
-from ultralytics import FastSAM
-from ultralytics.models.fastsam import FastSAMPredictor
 import numpy as np
+import torch
+from transformers import SegformerImageProcessor, SegformerForSemanticSegmentation
 
-app = FastAPI(title="FastSAM Image Segmentation API")
+app = FastAPI(title="SegFormer Image Segmentation API")
 
-# Initialize the FastSAM predictor
-MODEL_PATH = "../weights/fastsam.pt"
+# Initialize the SegFormer model and processor
+MODEL_NAME = "nvidia/segformer-b0-finetuned-ade-512-512"
 try:
-    # Check if model file exists
-    import os
-    if not os.path.exists(MODEL_PATH):
-        print(f"Error: Model file not found at {MODEL_PATH}")
-        predictor = None
-    else:
-        # Create FastSAMPredictor with configuration
-        overrides = dict(
-            conf=0.4,
-            iou=0.9,
-            task="segment",
-            mode="predict",
-            model=MODEL_PATH,
-            save=False,
-            imgsz=1024,
-            retina_masks=True
-        )
-        predictor = FastSAMPredictor(overrides=overrides)
+    processor = SegformerImageProcessor.from_pretrained(MODEL_NAME)
+    model = SegformerForSemanticSegmentation.from_pretrained(MODEL_NAME)
+    if torch.cuda.is_available():
+        model = model.to("cuda")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Model loaded successfully on {device}")
 except Exception as e:
-    print("Error loading FastSAM model:")
+    print("Error loading SegFormer model:")
     print(f"Error details: {e}")
-    predictor = None
+    processor = None
+    model = None
 
 
 def create_segmented_output(image: Image.Image, mask: np.ndarray) -> Image.Image:
     """Create a transparent PNG with only the segmented object.
-    The white part in the mask represents the object we want to keep."""
+    The mask represents the segmentation map where each pixel value corresponds to a class."""
 
-    # Ensure mask is binary (0 or 1)
-    binary_mask = mask.astype(np.uint8)
+    # Convert mask to binary (foreground vs background)
+    # Assuming 0 is background class, everything else is foreground
+    binary_mask = (mask > 0).astype(np.uint8)
 
-    # No need to invert since white (1) already represents the object we want to keep
     # Convert to 255 scale for alpha
     alpha_mask = binary_mask * 255
 
@@ -66,8 +55,8 @@ async def segment_image(
     width: float = Form(...),     # Normalized width (0-1)
     height: float = Form(...)     # Normalized height (0-1)
 ):
-    if not predictor:
-        print("Predictor not working")
+    if not processor or not model:
+        print("Model not loaded")
         raise HTTPException(status_code=500, detail="Model not loaded")
 
     if not file.content_type.startswith("image/"):
@@ -85,38 +74,40 @@ async def segment_image(
         # Get image dimensions
         img_width, img_height = image.size
 
-        # Convert YOLOv8 normalized coordinates to absolute coordinates
-        # YOLO format: [x_center, y_center, width, height] (normalized 0-1)
-        # Convert to [x1, y1, x2, y2] format
-        x1 = (x_center - width/2) * img_width
-        y1 = (y_center - height/2) * img_height
-        x2 = (x_center + width/2) * img_width
-        y2 = (y_center + height/2) * img_height
+        # Convert normalized coordinates to absolute coordinates
+        x1 = int((x_center - width/2) * img_width)
+        y1 = int((y_center - height/2) * img_height)
+        x2 = int((x_center + width/2) * img_width)
+        y2 = int((y_center + height/2) * img_height)
 
-        # Create bounding box in format [x1, y1, x2, y2]
-        bbox = [[x1, y1, x2, y2]]
+        # Crop the image to the region of interest
+        roi_image = image.crop((x1, y1, x2, y2))
 
-        # First get everything results
-        everything_results = predictor(image)
+        # Prepare the image for the model
+        inputs = processor(images=roi_image, return_tensors="pt")
+        if torch.cuda.is_available():
+            inputs = {k: v.to("cuda") for k, v in inputs.items()}
 
-        # Then use bbox prompt
-        prompt_results = predictor.prompt(everything_results, bboxes=bbox)
+        # Get model predictions
+        with torch.no_grad():
+            outputs = model(**inputs)
+            logits = outputs.logits
 
-        # Get the first result's masks
-        if not prompt_results or len(prompt_results) == 0:
-            raise HTTPException(
-                status_code=404, detail="No object detected in the specified bounding box")
+        # Get the predicted segmentation mask
+        upsampled_logits = torch.nn.functional.interpolate(
+            logits,
+            size=roi_image.size[::-1],  # (height, width)
+            mode="bilinear",
+            align_corners=False,
+        )
+        pred_mask = upsampled_logits.argmax(dim=1)[0].cpu().numpy()
 
-        result = prompt_results[0]
-        if not hasattr(result, 'masks') or result.masks is None or len(result.masks.data) == 0:
-            raise HTTPException(
-                status_code=404, detail="No masks found in the detection results")
-
-        # Get the first mask (most confident one for the bbox)
-        mask = result.masks.data[0].cpu().numpy()
+        # Create a full-size mask with the ROI segmentation
+        full_mask = np.zeros((img_height, img_width), dtype=np.uint8)
+        full_mask[y1:y2, x1:x2] = pred_mask
 
         # Create segmented output
-        result_image = create_segmented_output(image, mask)
+        result_image = create_segmented_output(image, full_mask)
 
         # Save to bytes
         img_byte_arr = io.BytesIO()
