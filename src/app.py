@@ -4,15 +4,43 @@ from PIL import Image
 import io
 import numpy as np
 import torch
-from transformers import SegformerImageProcessor, SegformerForSemanticSegmentation
+from transformers import SegformerImageProcessor, AutoModelForSemanticSegmentation
+import torch.nn.functional as F
 
-app = FastAPI(title="SegFormer Image Segmentation API")
+app = FastAPI(title="Clothes Segmentation API")
 
-# Initialize the SegFormer model and processor
-MODEL_NAME = "nvidia/segformer-b0-finetuned-ade-512-512"
+# Initialize the SegFormer model and processor for clothes segmentation
+MODEL_NAME = "mattmdjaga/segformer_b2_clothes"
+
+# Class labels for the model
+LABELS = {
+    0: "Background",
+    1: "Hat",
+    2: "Hair",
+    3: "Sunglasses",
+    4: "Upper-clothes",
+    5: "Skirt",
+    6: "Pants",
+    7: "Dress",
+    8: "Belt",
+    9: "Left-shoe",
+    10: "Right-shoe",
+    11: "Face",
+    12: "Left-leg",
+    13: "Right-leg",
+    14: "Left-arm",
+    15: "Right-arm",
+    16: "Bag",
+    17: "Scarf"
+}
+
+# Clothing-specific labels (indices of clothing items)
+# Upper-clothes, Skirt, Pants, Dress, Belt, Shoes, Bag, Scarf
+CLOTHING_LABELS = {4, 5, 6, 7, 8, 9, 10, 16, 17}
+
 try:
     processor = SegformerImageProcessor.from_pretrained(MODEL_NAME)
-    model = SegformerForSemanticSegmentation.from_pretrained(MODEL_NAME)
+    model = AutoModelForSemanticSegmentation.from_pretrained(MODEL_NAME)
     if torch.cuda.is_available():
         model = model.to("cuda")
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -25,15 +53,14 @@ except Exception as e:
 
 
 def create_segmented_output(image: Image.Image, mask: np.ndarray) -> Image.Image:
-    """Create a transparent PNG with only the segmented object.
-    The mask represents the segmentation map where each pixel value corresponds to a class."""
+    """Create a transparent PNG with only the clothing items.
+    The mask is a segmentation map where each pixel value corresponds to a class."""
 
-    # Convert mask to binary (foreground vs background)
-    # Assuming 0 is background class, everything else is foreground
-    binary_mask = (mask > 0).astype(np.uint8)
+    # Create a binary mask for clothing items
+    clothing_mask = np.isin(mask, list(CLOTHING_LABELS)).astype(np.uint8)
 
     # Convert to 255 scale for alpha
-    alpha_mask = binary_mask * 255
+    alpha_mask = clothing_mask * 255
 
     # Create alpha channel
     alpha = Image.fromarray(alpha_mask)
@@ -80,6 +107,12 @@ async def segment_image(
         x2 = int((x_center + width/2) * img_width)
         y2 = int((y_center + height/2) * img_height)
 
+        # Ensure coordinates are within image bounds
+        x1 = max(0, x1)
+        y1 = max(0, y1)
+        x2 = min(img_width, x2)
+        y2 = min(img_height, y2)
+
         # Crop the image to the region of interest
         roi_image = image.crop((x1, y1, x2, y2))
 
@@ -94,7 +127,7 @@ async def segment_image(
             logits = outputs.logits
 
         # Get the predicted segmentation mask
-        upsampled_logits = torch.nn.functional.interpolate(
+        upsampled_logits = F.interpolate(
             logits,
             size=roi_image.size[::-1],  # (height, width)
             mode="bilinear",
@@ -106,7 +139,7 @@ async def segment_image(
         full_mask = np.zeros((img_height, img_width), dtype=np.uint8)
         full_mask[y1:y2, x1:x2] = pred_mask
 
-        # Create segmented output
+        # Create segmented output (only clothing items)
         result_image = create_segmented_output(image, full_mask)
 
         # Save to bytes
