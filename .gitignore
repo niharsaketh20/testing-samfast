@@ -1,0 +1,20 @@
+# Model weights
+weights/*.pt
+weights/*.pth
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+venv/
+env/
+.env/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store 
