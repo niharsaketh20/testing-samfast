@@ -153,6 +153,61 @@ async def segment_image(
         raise HTTPException(
             status_code=500, detail=f"Error processing image: {str(e)}")
 
+
+@app.post("/segment-normal")
+async def segment_image_normal(
+    file: UploadFile
+):
+    if not processor or not model:
+        print("Model not loaded")
+        raise HTTPException(status_code=500, detail="Model not loaded")
+
+    if not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="File must be an image")
+
+    try:
+        # Read image from request
+        image_data = await file.read()
+        image = Image.open(io.BytesIO(image_data))
+
+        # Convert to RGB if necessary
+        if image.mode != "RGB":
+            image = image.convert("RGB")
+
+        # Prepare the image for the model
+        inputs = processor(images=image, return_tensors="pt")
+        if torch.cuda.is_available():
+            inputs = {k: v.to("cuda") for k, v in inputs.items()}
+
+        # Get model predictions
+        with torch.no_grad():
+            outputs = model(**inputs)
+            logits = outputs.logits
+
+        # Get the predicted segmentation mask
+        upsampled_logits = F.interpolate(
+            logits,
+            size=image.size[::-1],  # (height, width)
+            mode="bilinear",
+            align_corners=False,
+        )
+        pred_mask = upsampled_logits.argmax(dim=1)[0].cpu().numpy()
+
+        # Create segmented output (only clothing items)
+        result_image = create_segmented_output(image, pred_mask)
+
+        # Save to bytes
+        img_byte_arr = io.BytesIO()
+        result_image.save(img_byte_arr, format='PNG')
+        img_byte_arr = img_byte_arr.getvalue()
+
+        return Response(content=img_byte_arr, media_type="image/png")
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, detail=f"Error processing image: {str(e)}")
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
