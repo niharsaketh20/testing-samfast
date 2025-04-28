@@ -1,6 +1,6 @@
 from fastapi import FastAPI, UploadFile, HTTPException, Form
 from fastapi.responses import Response
-from PIL import Image
+from PIL import Image, ImageFilter
 import io
 import numpy as np
 import torch
@@ -53,9 +53,7 @@ except Exception as e:
 
 
 def create_segmented_output(image: Image.Image, mask: np.ndarray) -> Image.Image:
-    """Create a transparent PNG with only the clothing items.
-    The mask is a segmentation map where each pixel value corresponds to a class."""
-
+    """Create a transparent PNG with smoother clothing edges."""
     # Create a binary mask for clothing items
     clothing_mask = np.isin(mask, list(CLOTHING_LABELS)).astype(np.uint8)
 
@@ -65,10 +63,12 @@ def create_segmented_output(image: Image.Image, mask: np.ndarray) -> Image.Image
     # Create alpha channel
     alpha = Image.fromarray(alpha_mask)
 
+    alpha = alpha.filter(ImageFilter.GaussianBlur(radius=2))
+
     # Convert original image to RGBA
     image_rgba = image.convert('RGBA')
 
-    # Apply the mask as alpha channel
+    # Apply the smooth mask as alpha channel
     image_rgba.putalpha(alpha)
 
     return image_rgba

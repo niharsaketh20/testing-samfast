@@ -6,4 +6,5 @@ torch==2.1.1
 transformers==4.35.2
 python-multipart==0.0.6
 ultralytics==8.3.118
-supervision==0.18.0 
+supervision==0.18.0
+opencv-python==4.8.0.76 
